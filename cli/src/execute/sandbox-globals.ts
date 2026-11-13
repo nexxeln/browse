@@ -16,6 +16,7 @@ import type * as NetworkCapture from "../network-capture.ts"
 import { PageConsole } from "./console.ts"
 import { createDragHelper } from "./drag.ts"
 import { createScrollReadHelper } from "./scroll-read.ts"
+import { createFillCellHelper } from "./fill-cell.ts"
 import { createScreenshotDiff } from "../snapshot/screenshot-diff.ts"
 import {
   createAriaSnapshotHelper,
@@ -139,6 +140,7 @@ export function buildSandboxGlobals(deps: {
     },
     drag: createDragHelper(page, context),
     scrollRead: createScrollReadHelper(page),
+    fillCell: createFillCellHelper(page),
     fillInputs: async (targetPage, fields) => {
       await fillInputs(targetPage, fields)
       deps.warnSyntheticInput()
