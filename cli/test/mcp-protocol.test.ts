@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { bundleCli } from "../bundle.ts"
 import { startRelay, stopRelay } from "./relay-harness.ts"
-import { mcpStdio, resultText } from "./support/mcp-stdio.ts"
+import { manageCall, mcpStdio, resultJson, resultText } from "./support/mcp-stdio.ts"
 import { freePort } from "./support/ports.ts"
 
 // The real MCP server over stdio, answering a pre-2026 client (initialize) and a 2026-07-28 client (request metadata).
@@ -62,7 +62,7 @@ describe("binary auto-update", () => {
         if (((await mcp.request("tools/list")).result?.tools as unknown[])?.length) break
         await Bun.sleep(10)
       }
-      const create = (id: string) => mcp.request("tools/call", { name: "session_new", arguments: { id } })
+      const create = (id: string) => mcp.request("tools/call", manageCall("session_new", { id }))
       const first = await create("before-update")
       expect(first.result?.isError, JSON.stringify(first)).toBe(false)
       // The installer replaces the executable by rename, then the relay is restarted from the same path.
@@ -77,7 +77,8 @@ describe("binary auto-update", () => {
       extension = new RelayHarness.FakeExtension(home, port)
       expect(await extension.pair()).toBe(true)
       const next = await create("after-update")
-      expect(next.result?.structuredContent, JSON.stringify(next)).toMatchObject({ session: { id: "after-update" } })
+      expect(next.result?.isError, JSON.stringify(next)).toBe(false)
+      expect(resultJson(next)).toMatchObject({ session: { id: "after-update" } })
     } finally { extension?.close(); mcp.close(); relay.kill(); if (replacement) process.kill(replacement) }
   }, 60_000)
 })
@@ -95,23 +96,23 @@ describe("MCP protocol versions", () => {
       expect(await extension.pair()).toBe(true)
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
-      for (const [name, args] of [["session_new", { id: "survivor" }], ["execute", { session: "survivor", code: "return 42" }]] as const) {
+      for (const params of [manageCall("session_new", { id: "survivor" }), { name: "execute", arguments: { session: "survivor", code: "return 42" } }]) {
         extension.close()
         expect(await RelayHarness.until(() => extension.closeCode !== undefined)).toBe(true)
-        const first = mcp.request("tools/call", { name, arguments: args })
+        const first = mcp.request("tools/call", params)
         await Bun.sleep(350)
         extension = attach()
         expect(await extension.pair()).toBe(true)
         const reply = await first
         expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
-        // execute answers with the returned value as text (and no session id).
-        if (name === "execute") expect(resultText(reply).split("\n")[0]).toBe("42")
-        else expect(reply.result?.structuredContent).toMatchObject({ session: { id: "survivor" } })
+        // execute answers with the returned value as text (and no session id); the tools behind manage with their JSON.
+        if (params.name === "execute") expect(resultText(reply).split("\n")[0]).toBe("42")
+        else expect(resultJson(reply)).toMatchObject({ session: { id: "survivor" } })
       }
     } finally { extension.close(); mcp.close(); await stopRelay(relay.child) }
   }, 15_000)
 
-  test("advertises all tools on the first handshake, without waiting for browser discovery", async () => {
+  test("advertises execute and manage on the first handshake, without waiting for browser discovery", async () => {
     const relay = await startRelay(home)
     const proxy = Bun.serve({
       hostname: "127.0.0.1", port: await freePort(),
@@ -131,7 +132,8 @@ describe("MCP protocol versions", () => {
           const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
           expect(init.result?.capabilities).toHaveProperty("tools")
           mcp.notify("notifications/initialized")
-          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(18)
+          const tools = (await mcp.request("tools/list")).result?.tools as Array<{ name: string }>
+          expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
         } finally { mcp.close() }
       }
     } finally {
@@ -161,7 +163,7 @@ describe("MCP protocol versions", () => {
     try {
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
-      const call = await Promise.race([mcp.request("tools/call", { name: "status", arguments: {} }),
+      const call = await Promise.race([mcp.request("tools/call", manageCall("status")),
         Bun.sleep(9000).then(() => { throw new Error("tools/call never answered") })])
       expect(call.result?.isError).toBe(true)
       expect(JSON.stringify(call.result?.content)).toContain(`relay on port ${silent.port} isn't answering`)
@@ -178,8 +180,10 @@ describe("MCP protocol versions", () => {
     expect(init.result?.instructions).toContain("snapshot()")
     expect(init.result?.instructions).toContain("exist only inside the `code` string")
     mcp.notify("notifications/initialized")
-    expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBeGreaterThan(0)
-    expect((await mcp.request("tools/call", { name: "secrets_list", arguments: {} })).result?.isError).toBe(false)
+    const tools = (await mcp.request("tools/list")).result?.tools as Array<{ name: string; description: string; _meta?: Record<string, unknown> }>
+    expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
+    const secrets = await mcp.request("tools/call", manageCall("secrets_list"))
+    expect(secrets.result?.isError, JSON.stringify(secrets)).toBe(false)
     mcp.close()
   }, 30_000)
 
@@ -190,13 +194,13 @@ describe("MCP protocol versions", () => {
       const discover = await mcp.request("server/discover", { _meta: modernMeta })
       expect(discover.result?.supportedVersions).toContain("2026-07-28")
       expect(((await mcp.request("tools/list", { _meta: modernMeta })).result?.tools as unknown[]).length).toBeGreaterThan(0)
-      const first = await mcp.request("tools/call", { name: "status", arguments: {}, _meta: modernMeta })
-      const second = await mcp.request("tools/call", { name: "status", arguments: {}, _meta: modernMeta })
+      const first = await mcp.request("tools/call", { ...manageCall("status"), _meta: modernMeta })
+      const second = await mcp.request("tools/call", { ...manageCall("status"), _meta: modernMeta })
       expect(first.result?.isError).toBe(false)
       // Without protocol sessions, the server's implicit browse session still lasts for the connection.
-      const currentSession = (first.result?.structuredContent as { currentSession?: string }).currentSession
+      const currentSession = resultJson<{ currentSession?: string }>(first).currentSession
       expect(currentSession).toMatch(/^mcp-/)
-      expect((second.result?.structuredContent as { currentSession?: string }).currentSession).toBe(currentSession)
+      expect(resultJson<{ currentSession?: string }>(second).currentSession).toBe(currentSession)
     } finally {
       mcp.close()
       await stopRelay(relay.child)
@@ -216,21 +220,19 @@ describe("MCP protocol versions", () => {
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
       const before = await mcp.request("tools/list")
-      const tools = before.result?.tools as Array<{ name: string; annotations?: Record<string, unknown> }>
+      const tools = before.result?.tools as Array<{ name: string; annotations?: Record<string, unknown>; outputSchema?: unknown }>
+      expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
       const annotations = (name: string) => tools.find((tool) => tool.name === name)?.annotations
       expect(annotations("execute")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
-      expect(annotations("status")).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
-      expect(annotations("session_delete")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false })
-      expect(annotations("tabs_cleanup")).toMatchObject({ destructiveHint: true, openWorldHint: false })
-      expect(annotations("network")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: false })
-      expect(annotations("secrets_refresh")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true })
+      // manage fronts every other tool, so it advertises the widest of what they can do.
+      expect(annotations("manage")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
       // A browser joining or leaving changes no description or schema, so the client's prompt cache survives.
       second.close()
       await Bun.sleep(6_000)
       const after = await mcp.request("tools/list")
       expect(after.result).toEqual(before.result)
-      const status = await mcp.request("tools/call", { name: "status", arguments: {} })
-      const browsers = (status.result?.structuredContent as { status?: { browsers?: Array<{ name: string }> } }).status?.browsers
+      const status = await mcp.request("tools/call", manageCall("status"))
+      const browsers = resultJson<{ status?: { browsers?: Array<{ name: string }> } }>(status).status?.browsers
       expect(browsers?.map((browser) => browser.name)).toEqual(["Chrome on One"])
     } finally {
       first.close()

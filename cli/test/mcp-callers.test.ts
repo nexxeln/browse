@@ -8,7 +8,7 @@ import "../src/mcp.ts"
 import { buildRegisteredMcpTools, callerSessionId, createMcpToolContext } from "../src/mcp/registry.ts"
 import type * as RelayClient from "../src/relay/client.ts"
 import { FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
-import { mcpStdio, resultText, type McpReply } from "./support/mcp-stdio.ts"
+import { manageCall, mcpStdio, resultJson, resultText, type McpReply } from "./support/mcp-stdio.ts"
 
 // OpenCode runs one MCP server per server config and process, shared by every agent session and subagent, and names
 // the calling agent in each tools/call's _meta. Each named agent gets its own current session; calls that name no
@@ -22,9 +22,10 @@ const modernMeta = {
   "io.modelcontextprotocol/clientInfo": { name: "test", version: "0" },
 }
 const agent = (sessionID: string) => ({ "ai.opencode/sessionID": sessionID })
-const structured = (reply: McpReply) => {
+/** The JSON a tool behind `manage` answered with. */
+const answered = (reply: McpReply) => {
   expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
-  return reply.result?.structuredContent as Record<string, unknown>
+  return resultJson(reply)
 }
 
 /** A paired fake browser whose every new tab gets its own id and target, and that records each cleanup it's asked for. */
@@ -62,7 +63,13 @@ describe("one MCP server shared by several agents", () => {
     } as unknown as RelayClient.Interface
     const ctx = createMcpToolContext({ relay, currentSession: { id: "implicit", established: false }, packageRoot: home })
     const tools = buildRegisteredMcpTools(ctx)
-    const call = (name: string, args = {}, id = "agent-a") => Effect.runPromise(tools.find((tool) => tool.name === name)!.handle(args).pipe(
+    expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
+    // The session tools sit behind manage, which answers with the tool that handled the call and its value.
+    const manage = tools.find((tool) => tool.name === "manage")!
+    const call = (name: string, args = {}, id = "agent-a") => Effect.runPromise(manage.handle({ tool: name, args }).pipe(
+      Effect.map((value) => manage.route!(value)),
+      Effect.tap((routed) => Effect.sync(() => expect(routed.spec.name).toBe(name))),
+      Effect.map((routed) => routed.value),
       Effect.provideService(McpSchema.McpRequestContext, { clientId: 1, protocolVersion: "2025-11-25", clientCapabilities: {}, requestMetadata: agent(id) }),
     ))
     expect(await call("tabs_cleanup")).toEqual([])
@@ -95,7 +102,7 @@ describe("one MCP server shared by several agents", () => {
       const first = await initialized(relay.port)
       servers.push(first)
       const status = async (mcp: ReturnType<typeof mcpStdio>, meta?: Record<string, unknown>) =>
-        structured(await mcp.request("tools/call", { name: "status", arguments: {}, ...(meta ? { _meta: meta } : {}) })).currentSession
+        answered(await mcp.request("tools/call", { ...manageCall("status"), ...(meta ? { _meta: meta } : {}) })).currentSession
       const a = await status(first, agent("ses_agent_a"))
       const b = await status(first, agent("ses_agent_b"))
       const shared = await status(first)
@@ -118,8 +125,8 @@ describe("one MCP server shared by several agents", () => {
     const relay = await startRelay(home)
     const { extension, cleanups } = await browser(relay.port)
     const mcp = await initialized(relay.port)
-    const call = async (name: string, args: Record<string, unknown>, sessionID?: string) =>
-      structured(await mcp.request("tools/call", { name, arguments: args, ...(sessionID ? { _meta: agent(sessionID) } : {}) }))
+    const call = async (tool: string, args: Record<string, unknown>, sessionID?: string) =>
+      answered(await mcp.request("tools/call", { ...manageCall(tool, args), ...(sessionID ? { _meta: agent(sessionID) } : {}) }))
     // An execute result no longer names its session, so each bare execute marks the state of the session it runs in
     // and the session list says where the mark landed.
     const ranIn = async (mark: string, sessionID?: string) => {

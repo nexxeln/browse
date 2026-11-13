@@ -90,7 +90,7 @@ await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
     fs.copyFileSync(path.join(import.meta.dir, "fixtures", "legacy-shim.mjs"), shim)
     // Nothing listens on the relay port, so the shim swaps after a few checks instead of waiting for a relay.
     const mcp = mcpStdio({ home, port: await freePort(), command: ["node", shim], env: clean })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "manage", arguments: { tool: "secrets_list" } })
     try {
       await within(10_000, mcp.request("initialize", initialize), "initialize")
       mcp.notify("notifications/initialized")
@@ -124,7 +124,7 @@ await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
       return Response.json({ version: "1.0.0", draining })
     } })
     const mcp = mcpStdio({ home, port, command: ["node", entry], env: clean })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "manage", arguments: { tool: "secrets_list" } })
     try {
       await within(10_000, mcp.request("initialize", initialize), "initialize")
       mcp.notify("notifications/initialized")

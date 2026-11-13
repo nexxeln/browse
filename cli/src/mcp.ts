@@ -94,6 +94,13 @@ function shimSession(): string | undefined {
   return value && /^mcp-[0-9a-f]{8}$/.test(value) ? value : undefined
 }
 
+/** The tool a call is really for: the one `manage` routes to, else the tool itself. */
+const routedName = (spec: McpToolSpec, payload: unknown): string => {
+  if (!spec.route || payload === null || typeof payload !== "object") return spec.name
+  const tool = (payload as { readonly tool?: unknown }).tool
+  return typeof tool === "string" ? tool : spec.name
+}
+
 const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
@@ -157,11 +164,14 @@ const registerTools = Effect.gen(function* () {
           () =>
             operation.pipe(
               Effect.match({
-                onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
-                onSuccess: (value) =>
-                  spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
+                onFailure: (error) => toolResult({ text: mcpErrorMessage(routedName(spec, payload), error.message), isError: true }),
+                onSuccess: (value) => {
+                  // A grouped tool answers with the result of the tool that handled the action.
+                  const routed = spec.route ? spec.route(value) : { spec, value }
+                  return routed.spec.result ? routed.spec.result(routed.value) : toolResultForValue(routed.value, routed.spec.outputSchema ? { outputSchema: routed.spec.outputSchema } : {})
+                },
               }),
-              Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, spec.name, result)))),
+              Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, routedName(spec, payload), result)))),
             ),
           // Success, failure and interrupt all release the count, so a call that never answers can't wedge it.
           () => Effect.sync(toolCallFinished),

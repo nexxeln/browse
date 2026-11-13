@@ -48,10 +48,20 @@ export function mcpStdio(options: {
   }
 }
 
+/** The `tools/call` params for one of the tools behind `manage` (status, the session tools, secrets, and the rest). */
+export function manageCall(tool: string, args: Record<string, unknown> = {}) {
+  return { name: "manage", arguments: { tool, args } }
+}
+
 /** The text of a tool result: its first text block. Results are text only, with no structured copy. */
 export function resultText(reply: McpReply): string {
   const content = reply.result?.content as ReadonlyArray<{ type: string; text?: string }> | undefined
   const text = content?.find((item) => item.type === "text")?.text
   if (text === undefined) throw new Error(`no text in tool result: ${JSON.stringify(reply)}`)
   return text
+}
+
+/** The JSON value a tool behind `manage` answers with, which its result carries as text. */
+export function resultJson<T = Record<string, unknown>>(reply: McpReply): T {
+  return JSON.parse(resultText(reply)) as T
 }

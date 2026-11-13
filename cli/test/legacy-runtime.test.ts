@@ -179,7 +179,7 @@ describe("taking over the old self-managed runtime", () => {
       command: [node, shim],
       env: { OPENCODE_BROWSER_HOME: undefined, OPENCODE_BROWSER_CLIENT_PID: undefined, OPENCODE_BROWSER_MCP_DIRECT: undefined, OPENCODE_BROWSER_MCP_SESSION: undefined },
     })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "manage", arguments: { tool: "secrets_list" } })
     try {
       expect((await within(10_000, mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } }), "initialize")).result?.label).toBe("0.0.15-dev.108")
       mcp.notify("notifications/initialized")

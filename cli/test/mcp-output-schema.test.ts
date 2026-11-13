@@ -9,7 +9,6 @@ import {
   executeToolOutput,
   executeToolResult,
   executeToolText,
-  toolOutputJson,
   toolResultForValue,
 } from "../src/mcp/schema.ts"
 import type * as RelayClient from "../src/relay/client.ts"
@@ -33,12 +32,29 @@ function executeResponse(overrides: Partial<ExecuteResponse> = {}): ExecuteRespo
   }
 }
 
-function specs(): readonly McpToolSpec[] {
+/** The tools the server advertises (`execute` and `manage`), over a relay that answers what `relay` stubs. */
+function specs(relay: Partial<RelayClient.Interface> = {}): readonly McpToolSpec[] {
   return buildRegisteredMcpTools(createMcpToolContext({
-    relay: {} as RelayClient.Interface,
+    relay: relay as RelayClient.Interface,
     currentSession: { id: "mcp-1234abcd", established: true },
     packageRoot: "/tmp/browse",
   }))
+}
+
+/** Calls a tool behind `manage` the way the server does: the tool that handled the call, and the value it answered. */
+async function routed(tools: readonly McpToolSpec[], tool: string, args: Record<string, unknown> = {}) {
+  const manage = tools.find((spec) => spec.name === "manage")!
+  const answer = manage.route!(await Effect.runPromise(manage.handle({ tool, args })))
+  expect(answer.spec.name).toBe(tool)
+  return answer
+}
+
+/** What a tool behind `manage` sends for `value` as text: its JSON. */
+function sentJson(value: unknown): unknown {
+  const [text, ...rest] = textBlocks(toolResultForValue(value))
+  expect(rest).toEqual([])
+  expect(text).toBe(JSON.stringify(value))
+  return JSON.parse(text!)
 }
 
 function resultJson(result: McpSchema.CallToolResult): string {
@@ -83,44 +99,22 @@ function matchesJsonType(type: string, value: unknown): boolean {
   }
 }
 
-/** Every JSON Schema the MCP server advertises: each tool's input, and its structured result's output. */
+/** Every JSON Schema the MCP server advertises: each tool's input. No tool advertises an output schema. */
 function advertisedSchemas(): Array<{ name: string; json: unknown }> {
-  return specs().flatMap((spec) => [
-    { name: `${spec.name} input`, json: spec.inputSchema },
-    ...(spec.outputSchema ? [{ name: `${spec.name} output`, json: toolOutputJson(spec.outputSchema) }] : []),
-  ])
+  return specs().map((spec) => ({ name: `${spec.name} input`, json: spec.inputSchema }))
 }
 
 describe("tool output schemas", () => {
-  test("the main tools advertise an object-root output schema", () => {
-    const byName = new Map(specs().map((spec) => [spec.name, spec]))
-    const expected = [
-      "status",
-      "session_new",
-      "session_allowlist",
-      "session_list",
-      "session_use",
-      "session_reset",
-      "session_delete",
-      "session_adopt",
-      "network",
-      "recording",
-      "flight_recorder",
-      "tabs_cleanup",
-      "settings",
-      "secrets_list",
-      "secrets_status",
-      "secrets_refresh",
-      "secrets_run",
-    ]
-    for (const name of expected) {
-      const spec = byName.get(name)
-      expect(spec, name).toBeDefined()
-      expect(spec?.outputSchema, name).toBeDefined()
-      const json = toolOutputJson(spec!.outputSchema!)
-      expect(json.type, name).toBe("object")
-      expect(json.properties, name).toBeDefined()
-    }
+  test("the advertised tools are execute and manage, and neither has an output schema", () => {
+    const advertised = specs()
+    expect(advertised.map((spec) => spec.name)).toEqual(["execute", "manage"])
+    for (const spec of advertised) expect(spec.outputSchema, spec.name).toBeUndefined()
+    expect(advertised[1]!.inputSchema).toEqual({
+      type: "object",
+      properties: { tool: { type: "string" }, args: { type: "object" } },
+      required: ["tool"],
+      additionalProperties: false,
+    })
   })
 
   test("execute advertises no output schema, so a client that validates one accepts its image results", () => {
@@ -138,27 +132,22 @@ describe("tool output schemas", () => {
     expect(rejected).toBe(false)
   })
 
-  test("tool annotations describe what each tool can do", () => {
+  test("tool annotations describe what each advertised tool can do", () => {
     const byName = new Map(specs().map((spec) => [spec.name, spec]))
     const annotation = (name: string) => {
       const spec = byName.get(name)!
       return { readOnly: spec.readOnly, destructive: spec.destructive, idempotent: spec.idempotent, openWorld: spec.openWorld }
     }
     expect(annotation("execute")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
-    expect(annotation("status")).toEqual({ readOnly: true, destructive: false, idempotent: true, openWorld: false })
-    expect(annotation("session_delete")).toEqual({ readOnly: false, destructive: true, idempotent: true, openWorld: false })
-    expect(annotation("session_reset")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
-    expect(annotation("tabs_cleanup")).toEqual({ readOnly: false, destructive: true, idempotent: true, openWorld: false })
-    expect(annotation("network")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
-    expect(annotation("secrets_refresh")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
-    expect(annotation("settings")).toEqual({ readOnly: false, destructive: false, idempotent: true, openWorld: false })
+    // manage fronts every other tool (session_delete, secrets_refresh, ...), so it advertises the widest of them.
+    expect(annotation("manage")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
     for (const spec of specs()) expect(typeof spec.openWorld, spec.name).toBe("boolean")
   })
 
-  test("settings schema accepts both the read and the change result", () => {
-    const spec = specs().find((candidate) => candidate.name === "settings")!
+  test("settings schema accepts both the read and the change result", async () => {
     const setting = { value: "shared", effective: "shared", allowed: ["shared", "window"], description: "Grouping" }
     const settings = Object.fromEntries(agentSettingKeys.map((key) => [key, setting]))
+    const { spec } = await routed(specs({ settingsGet: Effect.succeed({ settings, note: "read" }) } as unknown as Partial<RelayClient.Interface>), "settings")
     expect(Schema.is(spec.outputSchema!)({ settings, note: "read" })).toBe(true)
     expect(Schema.is(spec.outputSchema!)({
       changed: [{ key: "grouping", from: "window", to: "shared" }],
@@ -169,7 +158,7 @@ describe("tool output schemas", () => {
     })).toBe(true)
   })
 
-  test("merged action tools produce valid structured results for every action", async () => {
+  test("merged action tools answer every action with JSON that fits the result they declare", async () => {
     const networkReport = {
       active: true,
       startedAt: "2026-01-01T00:00:00.000Z",
@@ -266,7 +255,7 @@ describe("tool output schemas", () => {
       currentSession: { id: "mcp-1234abcd", established: true },
       packageRoot: "/tmp/browse",
     })
-    const byName = new Map(buildRegisteredMcpTools(ctx).map((spec) => [spec.name, spec]))
+    const tools = buildRegisteredMcpTools(ctx)
     const cases: Record<string, ReadonlyArray<{ action: string; [key: string]: unknown }>> = {
       network: [
         { action: "start" },
@@ -288,14 +277,11 @@ describe("tool output schemas", () => {
       ],
     }
     for (const [name, actions] of Object.entries(cases)) {
-      const spec = byName.get(name)!
-      expect(spec, name).toBeDefined()
       for (const args of actions) {
-        const value = await Effect.runPromise(spec.handle({ session: "mcp-1234abcd", ...args }))
-        const result = toolResultForValue(value, { outputSchema: spec.outputSchema! })
-        expect(result.isError, `${name} ${args.action}`).toBe(false)
-        expect(result.structuredContent, `${name} ${args.action}`).toBeDefined()
-        expect(Schema.is(spec.outputSchema!)(result.structuredContent), `${name} ${args.action}`).toBe(true)
+        const { spec, value } = await routed(tools, name, { session: "mcp-1234abcd", ...args })
+        const sent = sentJson(value)
+        expect(sent, `${name} ${args.action}`).toMatchObject({ action: args.action, session: "mcp-1234abcd" })
+        expect(Schema.is(spec.outputSchema!)(sent), `${name} ${args.action}`).toBe(true)
       }
     }
   })
@@ -314,12 +300,14 @@ describe("tool output schemas", () => {
       currentSession: { id: "mcp-1234abcd", established: true },
       packageRoot: "/tmp/browse",
     })
-    const spec = buildRegisteredMcpTools(ctx).find((candidate) => candidate.name === "settings")!
-    const read = await Effect.runPromise(spec.handle({}) as Effect.Effect<{ settings: Record<string, unknown> }, Error>)
+    const tools = buildRegisteredMcpTools(ctx)
+    const { spec, value } = await routed(tools, "settings")
+    const read = sentJson(value) as { settings: Record<string, unknown> }
     expect(read.settings).not.toHaveProperty("autoUpdate")
     expect(Object.keys(read.settings).sort()).toEqual([...agentSettingKeys].sort())
     expect(Schema.is(spec.outputSchema!)(read)).toBe(true)
-    const failure = await Effect.runPromise(Effect.flip(spec.handle({ set: { autoUpdate: "notify" } }) as Effect.Effect<unknown, Error>))
+    const manage = tools.find((candidate) => candidate.name === "manage")!
+    const failure = await Effect.runPromise(Effect.flip(manage.handle({ tool: "settings", args: { set: { autoUpdate: "notify" } } })))
     expect(failure.message).toContain("browse settings set autoUpdate")
   })
 
@@ -538,11 +526,11 @@ describe("tool output schemas", () => {
       currentSession: { id: "mcp-1234abcd", established: true },
       packageRoot: "/tmp/browse",
     })
-    const spec = buildRegisteredMcpTools(ctx).find((candidate) => candidate.name === "session_adopt")!
-    const value = await Effect.runPromise(spec.handle({}))
-    expect(value).toEqual(adopted)
-    expect(value).not.toHaveProperty("confirmation")
-    expect(Schema.is(spec.outputSchema!)(value)).toBe(true)
+    const { spec, value } = await routed(buildRegisteredMcpTools(ctx), "session_adopt")
+    const sent = sentJson(value)
+    expect(sent).toEqual(adopted)
+    expect(sent).not.toHaveProperty("confirmation")
+    expect(Schema.is(spec.outputSchema!)(sent)).toBe(true)
   })
 })
 
@@ -564,16 +552,18 @@ describe("advertised tool schemas", () => {
     expect(problems).toEqual([])
   })
 
-  test("settings idleMinutes splits its minutes and 'never' into single-typed enums", () => {
-    const input = specs().find((spec) => spec.name === "settings")!.inputSchema
-    const set = (input.properties as Record<string, { properties: Record<string, unknown> }>).set!
-    expect(set.properties.idleMinutes).toEqual({
+  test("settings idleMinutes splits its minutes and 'never' into single-typed enums", async () => {
+    // The settings tool sits behind manage, whose help prints the tool's arguments as the JSON Schema they keep.
+    const manage = specs().find((spec) => spec.name === "manage")!
+    const help = manage.route!(await Effect.runPromise(manage.handle({ tool: "help", args: { tool: "settings" } }))).value as string
+    expect(help).toStartWith("settings: Read or change the user's browse settings")
+    expect(help).toContain(`"idleMinutes":${JSON.stringify({
       anyOf: [
         { type: "integer", enum: [10, 30, 60] },
         { type: "string", enum: ["never"] },
       ],
       description: settingSpecs.idleMinutes.label,
-    })
+    })}`)
   })
 
   test("settings idleMinutes still decodes every value it advertises", () => {

@@ -271,7 +271,7 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
   }, 20_000)
 
   test("a slow tool call still answers after stdin EOF", async () => {
-    // `tabs_cleanup` needs the relay. A port that accepts but never answers makes its relay probe wait for the 5 s read
+    // `manage` routes to `tabs_cleanup`, which needs the relay. A port that accepts but never answers makes its relay probe wait for the 5 s read
     // timeout, so a tool call is genuinely in flight when stdin closes: it must still be answered. Only a request that
     // never answers, such as `subscriptions/listen`, may be cut.
     const relay = await blackholeRelay()
@@ -281,7 +281,7 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
     })
     try {
       await mcp.handshake()
-      const reply = mcp.request(3, "tools/call", { name: "tabs_cleanup", arguments: {} })
+      const reply = mcp.request(3, "tools/call", { name: "manage", arguments: { tool: "tabs_cleanup" } })
       // Let the call reach the tool before the client goes away.
       await Bun.sleep(300)
       const started = Date.now()

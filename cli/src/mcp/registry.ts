@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { Effect, Option, type Schema } from "effect"
 import { McpSchema } from "effect/ai"
 import type { JsonObject } from "../protocol.ts"
+import { compactTools } from "./compact.ts"
 import type * as RelayClient from "../relay/client.ts"
 import type { UpdateNotice } from "../update.ts"
 import { optionalStringField, type Caller, type CurrentSession } from "./schema.ts"
@@ -21,6 +22,8 @@ export type McpToolSpec = {
   readonly outputSchema?: Schema.ConstraintEncoder<unknown, never>
   /** Overrides the generic tool result (execute shapes its value and context itself). */
   readonly result?: (value: unknown) => McpSchema.CallToolResult
+  /** For a tool that fronts several others: which one handled the call, and its value, so the right result shaper runs. */
+  readonly route?: (value: unknown) => { readonly spec: McpToolSpec; readonly value: unknown }
 }
 
 export type McpToolContext = {
@@ -135,7 +138,7 @@ export function createMcpToolContext(options: {
 }
 
 export function buildRegisteredMcpTools(ctx: McpToolContext): readonly McpToolSpec[] {
-  return [...groups]
+  return compactTools([...groups]
     .sort((left, right) => left.order - right.order)
-    .flatMap((group) => group.build(ctx))
+    .flatMap((group) => group.build(ctx)))
 }
