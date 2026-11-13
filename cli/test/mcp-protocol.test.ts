@@ -179,12 +179,19 @@ describe("MCP protocol versions", () => {
     const mcp = server()
     const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
     expect(init.result?.protocolVersion).toBe("2025-11-25")
-    expect(init.result?.instructions).toContain("snapshot()")
-    expect(init.result?.instructions).toContain("exist only inside the `code` string")
+    // The instructions are one sentence naming the two tools; how to work is in the execute description instead.
+    const instructions = init.result?.instructions as string
+    expect(instructions).toContain("run Playwright code with `execute`")
+    expect(instructions).toContain("`manage` has status, sessions, recording and the rest")
+    expect(instructions).not.toContain("\n")
+    expect(instructions).not.toContain("snapshot()")
     mcp.notify("notifications/initialized")
     const tools = (await mcp.request("tools/list")).result?.tools as Array<{ name: string; description: string; _meta?: Record<string, unknown> }>
     expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
     const execute = tools[0]!
+    expect(execute.description).toContain('await ref("e12").click()')
+    expect(execute.description).toContain("Don't spend a call on snapshot()")
+    expect(execute.description).toContain('await handoff("what to do")')
     // Clients that defer tools behind a tool search keep execute loaded.
     expect(execute._meta).toEqual({ "anthropic/alwaysLoad": true })
     expect(tools[1]!._meta).toBeUndefined()

@@ -9,37 +9,33 @@ registerMcpTools({
   build: (ctx) => [
     {
       name: "execute",
-      description: `Execute Playwright JavaScript against the browse session. Code runs in a restricted JavaScript realm on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots (file paths, including Playwright options like screenshot({ path }), must be in folders you own without group/world write access; files.path(name) gives a safe one), and cookie access is limited to the session's pages. Synchronous code stops after about 2 seconds. It is not a security boundary, so treat code as running as the user. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).`,
+      description: `Run Playwright JavaScript on your browse session's page: the tab the user lent you when there is one, else a new tab. The user's logins are already there.
+
+The result is your \`return\` value, then what the call did:
+- Requests: the page's non-GET requests with their status (\`POST /api/items {…} → 201\`), your proof a write reached the server.
+- The page: all of it the first time and after a navigation, afterwards only the lines that changed. Controls are written \`[e12 button "Save"]\`.
+
+Each call re-sends the whole conversation, so use as few calls as you can:
+- Act on what the result shows. Don't spend a call on snapshot(), a text read, or re-checking what the result already proved. To just look, run \`return ""\`.
+- \`await ref("e12").click()\`, \`.fill("…")\`, \`.selectOption("…")\`. Refs last until the page navigates. Playwright locators (page.getByRole, getByLabel, getByText, CSS) need no ref.
+- Put every step you can already name in one call: fill a whole form and submit it, loop over rows, visit several pages and return only the facts you need. End a call only where the next step depends on something you haven't seen.
+- Another site: page.goto(url). To keep this page open too, \`await (await context.newPage()).goto(url)\`, then pass targetUrl on later calls to work in that tab; each tab has its own page view and refs.
+- \`await drag(from, to, { position: "before" | "after" })\` drags and drops (locator.dragTo does not work here). \`await fillCell(rowLocator, "Column header", value)\` sets a table or grid cell: it opens the cell's editor, types and commits. \`await scrollRead(locator, { match })\` returns the rows of a list that loads or renders as it scrolls. To see an image or canvas, \`return await locator.screenshot()\`.
+
+Press the buttons the request calls for yourself (submit, save, place order, confirm and pay with a saved card). Use \`await handoff("what to do")\` only for what a site demands of a person: a login with no stored secret, a 2FA code, a passkey, a captcha, a bank's own verification. Never solve a captcha or retry a site that blocks you. Type stored secrets with secrets.type(locator, name), never in code. The code runs in a restricted realm (no process, require, import(), fs or Node fetch); it is not a security boundary.`,
       alwaysLoad: true,
       inputSchema: objectSchema(
         {
           code: {
             type: "string",
             description:
-              'JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir and roots properties; path(name), write(target, data), read(target, encoding?)), fillInput, fillInputs, snapshot(options?) for compact semantic outlines of the page and the content of its iframes (options: find to search them, diff or delta for changes, frames: false to leave iframe content out), persistent compatible ref(id) locators that resolve inside the frame they came from, webmcp (list/call), screenshotWithLabels(options?) and screenshotDiff(options) for screenshots, ariaSnapshot for Playwright\'s YAML tree followed by a labelled block per iframe with its content, ghostCursor, handoff, demonstrate, network (start/status/stop/cancel), pageConsole (start/stop capturing the page\'s own console messages and errors, off by default because pages can detect it), and secrets.type(locator, name) to type a stored site secret (see secrets_list) only on its allowed origins, without seeing it. There is no location, document or fetch global (they belong to the page: use page.url() or page.evaluate(...)), and no structuredClone. These helpers exist only inside this string, never as globals of a client\'s own code runtime: in a client that runs tools in its own code mode, pass the Playwright code here as a string.',
+              "JavaScript. In scope: page, context, browser, state (kept between calls), ref(id), drag, fillCell, scrollRead, snapshot({ within?, find?, diff? }) (controls only), ariaSnapshot, screenshotWithLabels, screenshotDiff, files (path, write, read), handoff, demonstrate, ghostCursor, webmcp, network, pageConsole, secrets. No document, location or fetch globals: use page.evaluate(...) and page.url().",
           },
-          session: {
-            type: "string",
-            description:
-              "Optional existing browse session id. Explicit ids must already exist; omit this field to use your current session (per agent when the client names it; see `status`), which is created when needed.",
-          },
-          targetUrl: {
-            type: "string",
-            description:
-              "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that.",
-          },
-          targetIndex: {
-            type: "integer",
-            minimum: 0,
-            description: "Optional zero-based attached page index selector.",
-          },
-          browser: ctx.browserProperty,
-          timeoutMs: {
-            type: "integer",
-            minimum: 0,
-            description:
-              "Optional overall script timeout in milliseconds (paused while handoff() waits on the user); defaults to 60000, 0 disables. It includes time spent waiting behind another execute on the same session, and that call's handoff does not pause it. When set, it is also the timeout for Playwright actions and navigations in the code, at least 30 seconds; 0 removes those too.",
-          },
+          session: { type: "string", description: "Session id; omit for your current session." },
+          targetUrl: { type: "string", description: "Run on the attached page whose URL contains this (does not navigate)." },
+          targetIndex: { type: "integer", minimum: 0 },
+          browser: { type: "string", description: "Browser id for a new session; see status." },
+          timeoutMs: { type: "integer", minimum: 0, description: "Script timeout (default 60000; 0 disables)." },
         },
         ["code"],
       ),
