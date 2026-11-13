@@ -73,6 +73,13 @@ export type SnapshotRefRegistry = {
   url?: string
   selectors: Map<string, SnapshotRefTarget>
   previousSnapshot?: SnapshotBaseline
+  /**
+   * Every entry the page view has given a ref on this document, including ones not on screen now (the page behind a
+   * modal, a closed menu), so a control keeps the ref the agent first saw for it.
+   */
+  viewMemory?: { readonly page: Page; readonly url: string; readonly entries: readonly SnapshotRenderedEntry[] }
+  /** Ids of the refs the page view minted itself, by selector, for elements the snapshot gave none. */
+  viewMinted?: { readonly page: Page; readonly url: string; readonly ids: Map<string, string> }
   nextRef?: number
   locatorScopes?: WeakMap<object, number>
   nextLocatorScope?: number
