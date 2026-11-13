@@ -61,6 +61,7 @@ export type HideGhostCursorOptions = {
 }
 
 import type { DragHelper } from "./drag.ts"
+import type { ScrollReadHelper } from "./scroll-read.ts"
 
 export type SandboxGlobals = {
   readonly browser: Browser
@@ -72,6 +73,7 @@ export type SandboxGlobals = {
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
   readonly drag: DragHelper
+  readonly scrollRead: ScrollReadHelper
   readonly screenshotWithLabels: (options?: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
   readonly screenshotDiff: (options: ScreenshotDiffOptions) => Promise<ScreenshotDiffResult>
   readonly ariaSnapshot: AriaSnapshotHelper
@@ -214,6 +216,7 @@ const sandboxGlobalKeys = [
   "fillInput",
   "fillInputs",
   "drag",
+  "scrollRead",
   "screenshotWithLabels",
   "screenshotDiff",
   "ariaSnapshot",
