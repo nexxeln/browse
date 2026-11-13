@@ -632,6 +632,88 @@ function dropReplacedLines(lines: readonly string[]): string[] {
   return output
 }
 
+/**
+ * Whether `value` is this page's own text, as `innerText` gives it: nearly every line of it is in the view. An agent
+ * that returns it gets the same words twice, so the caller shows the view once instead.
+ */
+export function isPageText(value: string, view: PageView): boolean {
+  if (value.length < 600 || view.truncated) return false
+  const squash = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim()
+  const page = squash(view.lines.join("\n"))
+  if (page.length > fullViewLimit) return false
+  let total = 0
+  let found = 0
+  for (const raw of value.split("\n")) {
+    const line = squash(raw)
+    if (line.length < 3) continue
+    total += line.length
+    if (page.includes(line.length > 80 ? line.slice(0, 80) : line)) found += line.length
+  }
+  return total >= 400 && found >= total * 0.85
+}
+
+/** Page-view text in the form returned text is compared against: lower case, single spaces. */
+export const comparableText = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim()
+
+const elideMinLines = 6
+const elideMinChars = 200
+
+/**
+ * Removes from text the code returned the stretches that are the page itself, which the page view in the same
+ * result covers: a run of at least six lines, each found in `shown` (the page's text). A page read with innerText repeats its header, lists and footer every
+ * time; only what is new in it is worth sending again. Short matches are left alone, so an answer that happens to
+ * quote the page survives.
+ */
+export function elideShownText(text: string, shown: string): { readonly text: string; readonly elided: number } {
+  if (text.length < 400 || shown.length === 0) return { text, elided: 0 }
+  const lines = text.split("\n")
+  const known = lines.map((raw) => {
+    const line = comparableText(raw)
+    // A line too short to identify anything (a count, initials) neither makes a run nor breaks one.
+    if (line.length < 4) return undefined
+    return shown.includes(line.length > 80 ? line.slice(0, 80) : line)
+  })
+  const output: string[] = []
+  let elided = 0
+  for (let start = 0; start < lines.length;) {
+    if (known[start] !== true) {
+      output.push(lines[start]!)
+      start++
+      continue
+    }
+    let end = start
+    let count = 0
+    let chars = 0
+    // Blank lines ride along with the run they sit in.
+    while (end < lines.length && known[end] !== false) {
+      if (known[end] === true) {
+        count++
+        chars += lines[end]!.length
+      }
+      end++
+    }
+    while (end > start && known[end - 1] === undefined) end--
+    if (count >= elideMinLines && chars >= elideMinChars) {
+      output.push(`[… ${count} lines of the page, as in the page view …]`)
+      elided += chars
+    } else {
+      output.push(...lines.slice(start, end))
+    }
+    start = end
+  }
+  return elided > 0 ? { text: output.join("\n"), elided } : { text, elided: 0 }
+}
+
+/** Applies elideShownText to a returned value's strings: the value itself, or strings in plain arrays and objects. */
+export function elideShownValue(value: unknown, shown: string, depth = 0): unknown {
+  if (typeof value === "string") return elideShownText(value, shown).text
+  if (depth >= 3 || value === null || typeof value !== "object") return value
+  if (Array.isArray(value)) return value.map((item) => elideShownValue(item, shown, depth + 1))
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, elideShownValue(item, shown, depth + 1)]))
+}
+
 /** What went away matters less than what appeared: removed lines are clipped, and a long run of them is counted. */
 function compactRemovals(lines: readonly string[]): string[] {
   const output: string[] = []

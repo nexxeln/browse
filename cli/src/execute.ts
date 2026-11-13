@@ -2,7 +2,7 @@ import { Effect, Fiber } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import { registerRefSelector } from "./snapshot/ref-selector.ts"
-import { capturePageView, rememberPageView, renderPageView, settlePage, type PageView } from "./snapshot/page-view.ts"
+import { capturePageView, comparableText, elideShownValue, isPageText, rememberPageView, renderPageView, settlePage, type PageView } from "./snapshot/page-view.ts"
 import { trackRequests, type RequestTracker } from "./execute/request-log.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
@@ -195,7 +195,13 @@ export type ExecuteOptions = {
 type Observation = {
   readonly view?: string
   readonly requests?: readonly string[]
+  /** The code returned a page's own text, which the view (printed in full) already carries. */
+  readonly valueCovered?: true
+  /** Everything the agent has been sent in page views of the pages this call read, for trimming repeats. */
+  readonly shown?: string
 }
+
+const coveredNote = "(Your return value was the page's own text. It is below once, as the page view, with refs.)"
 
 /** Observations for a failed execute, keyed by the error that carries it out of the run. */
 const observations = new WeakMap<object, Observation>()
@@ -296,13 +302,14 @@ export class ExecuteSandbox extends DefaultPageHost {
                   const failure = error.aftermath
                     ? new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
                     : error
-                  observations.set(failure, observed)
+                  const { shown: _shown, valueCovered: _covered, ...kept } = observed
+                  observations.set(failure, kept)
                   throw failure
                 })
               globals.context.off("page", onPage)
-              const observed = await this.observePage(globals, requests, opened)
+              const { valueCovered, shown, ...observed } = await this.observePage(globals, requests, opened, result)
               await this.networkCapture.settleForOutput()
-              const extracted = extractExecuteMedia(result)
+              const extracted = extractExecuteMedia(valueCovered ? coveredNote : shown ? elideShownValue(result, shown) : result)
               const redactedValue = this.secrets.redactOutputValue(extracted.value)
               const jsonSafeResult = toJsonSafeValue(redactedValue)
               const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
@@ -439,7 +446,8 @@ export class ExecuteSandbox extends DefaultPageHost {
    * What the agent would otherwise spend its next call finding out: the requests its code caused and the page as it
    * now stands (or how it changed). Waits briefly for requests in flight and for the DOM to settle. Never throws.
    */
-  private async observePage(globals: SandboxGlobals, requests: RequestTracker, opened: readonly Page[] = []): Promise<Observation> {
+  private async observePage(globals: SandboxGlobals, requests: RequestTracker, opened: readonly Page[] = [], returned?: unknown): Promise<Observation> {
+    const returnedText = typeof returned === "string" ? returned : undefined
     const deadline = Date.now() + observeBudgetMs
     try {
       while (requests.pending() && Date.now() < deadline - 2_000) await new Promise((resolve) => setTimeout(resolve, 25))
@@ -457,11 +465,15 @@ export class ExecuteSandbox extends DefaultPageHost {
       const view = await withDeadline(capturePageView(page, globals.snapshot, refs.registry), Math.max(500, deadline - Date.now()))
       this.nextRef = Math.max(this.nextRef, refs.registry.nextRef ?? 1)
       if (!view) return withRequests(this.secrets, lines, undefined)
-      const previous = refs.lastView
+      // Returned text that is this page's text is shown once: as the whole view, whatever the diff would have been.
+      const coversPage = returnedText !== undefined && isPageText(returnedText, view)
+      const previous = coversPage ? undefined : refs.lastView
       refs.lastView = rememberPageView(refs.lastView, view)
       // A tab the code opened is shown at once, so the agent need not spend a call to look at it.
       const fresh = opened.filter((other) => other !== page && !other.isClosed()).at(-1)
       let freshView = ""
+      let freshText = ""
+      let coversFresh = false
       if (fresh && Date.now() < deadline - 800) {
         const freshRefs = this.refsFor(fresh)
         freshRefs.registry.nextRef = Math.max(freshRefs.registry.nextRef ?? 1, this.nextRef)
@@ -471,7 +483,9 @@ export class ExecuteSandbox extends DefaultPageHost {
         )
         this.nextRef = Math.max(this.nextRef, freshRefs.registry.nextRef ?? 1)
         if (captured) {
-          freshView = `\n\nNew tab (pass targetUrl to work in it, its refs resolve there):\n${renderPageView(freshRefs.lastView, captured)}`
+          freshText = captured.text ?? ""
+          coversFresh = returnedText !== undefined && !coversPage && isPageText(returnedText, captured)
+          freshView = `\n\nNew tab (pass targetUrl to work in it, its refs resolve there):\n${renderPageView(coversFresh ? undefined : freshRefs.lastView, captured)}`
           freshRefs.lastView = rememberPageView(freshRefs.lastView, captured)
         }
       }
@@ -479,7 +493,11 @@ export class ExecuteSandbox extends DefaultPageHost {
       const tabs = others.length > 0
         ? `\nOther tabs (run on one with targetUrl): ${others.slice(0, 6).map((other) => other.url()).join(" · ")}`
         : ""
-      return withRequests(this.secrets, lines, `${renderPageView(previous, view)}${tabs}${freshView}`)
+      const rendered = renderPageView(previous, view)
+      const observation = withRequests(this.secrets, lines, `${rendered}${tabs}${freshView}`)
+      // The text of the pages this result shows, for trimming repeats of it out of the returned value.
+      const shown = comparableText(`${view.text ?? ""} ${freshText}`)
+      return coversPage || coversFresh ? { ...observation, valueCovered: true, shown } : { ...observation, shown }
     } catch {
       return withRequests(this.secrets, requests.stop(), undefined)
     }
