@@ -49,7 +49,7 @@ async function routed(tools: readonly McpToolSpec[], tool: string, args: Record<
   return answer
 }
 
-/** What a tool behind `manage` sends for `value` as text: its JSON. */
+/** What a tool behind `manage` sends for `value`: its JSON as text. The server drops the structured copy. */
 function sentJson(value: unknown): unknown {
   const [text, ...rest] = textBlocks(toolResultForValue(value))
   expect(rest).toEqual([])

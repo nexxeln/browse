@@ -17,7 +17,6 @@ import {
 import {
   mcpErrorMessage,
   mcpUpdateNote,
-  toolOutputJson,
   toolResult,
   toolResultForValue,
   type Caller,
@@ -101,6 +100,16 @@ const routedName = (spec: McpToolSpec, payload: unknown): string => {
   return typeof tool === "string" ? tool : spec.name
 }
 
+/**
+ * A tool's result as text only. Tools advertise no output schema and send no structured copy: a client that loads
+ * tool definitions up front would pay for every schema on every model call, and one that shows both copies of a
+ * result would pay for each result twice.
+ */
+const textResult = (value: unknown): McpSchema.CallToolResult => {
+  const result = toolResultForValue(value)
+  return result.structuredContent === undefined ? result : new McpSchema.CallToolResult({ content: result.content, isError: result.isError })
+}
+
 const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
@@ -139,7 +148,6 @@ const registerTools = Effect.gen(function* () {
         name: spec.name,
         description: spec.description,
         inputSchema: spec.inputSchema,
-        ...(spec.outputSchema ? { outputSchema: toolOutputJson(spec.outputSchema) } : {}),
         annotations: {
           readOnlyHint: spec.readOnly,
           destructiveHint: spec.destructive,
@@ -168,7 +176,7 @@ const registerTools = Effect.gen(function* () {
                 onSuccess: (value) => {
                   // A grouped tool answers with the result of the tool that handled the action.
                   const routed = spec.route ? spec.route(value) : { spec, value }
-                  return routed.spec.result ? routed.spec.result(routed.value) : toolResultForValue(routed.value, routed.spec.outputSchema ? { outputSchema: routed.spec.outputSchema } : {})
+                  return routed.spec.result ? routed.spec.result(routed.value) : textResult(routed.value)
                 },
               }),
               Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, routedName(spec, payload), result)))),

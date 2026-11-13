@@ -78,6 +78,7 @@ describe("binary auto-update", () => {
       expect(await extension.pair()).toBe(true)
       const next = await create("after-update")
       expect(next.result?.isError, JSON.stringify(next)).toBe(false)
+      expect(next.result).not.toHaveProperty("structuredContent")
       expect(resultJson(next)).toMatchObject({ session: { id: "after-update" } })
     } finally { extension?.close(); mcp.close(); relay.kill(); if (replacement) process.kill(replacement) }
   }, 60_000)
@@ -105,6 +106,7 @@ describe("MCP protocol versions", () => {
         expect(await extension.pair()).toBe(true)
         const reply = await first
         expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
+        expect(reply.result).not.toHaveProperty("structuredContent")
         // execute answers with the returned value as text (and no session id); the tools behind manage with their JSON.
         if (params.name === "execute") expect(resultText(reply).split("\n")[0]).toBe("42")
         else expect(resultJson(reply)).toMatchObject({ session: { id: "survivor" } })
@@ -226,6 +228,8 @@ describe("MCP protocol versions", () => {
       expect(annotations("execute")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
       // manage fronts every other tool, so it advertises the widest of what they can do.
       expect(annotations("manage")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
+      // No tool advertises an output schema: results are text only.
+      for (const tool of tools) expect(tool.outputSchema, tool.name).toBeUndefined()
       // A browser joining or leaving changes no description or schema, so the client's prompt cache survives.
       second.close()
       await Bun.sleep(6_000)

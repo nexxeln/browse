@@ -22,9 +22,10 @@ const modernMeta = {
   "io.modelcontextprotocol/clientInfo": { name: "test", version: "0" },
 }
 const agent = (sessionID: string) => ({ "ai.opencode/sessionID": sessionID })
-/** The JSON a tool behind `manage` answered with. */
+/** The JSON a tool behind `manage` answered with. Results are text only. */
 const answered = (reply: McpReply) => {
   expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
+  expect(reply.result).not.toHaveProperty("structuredContent")
   return resultJson(reply)
 }
 

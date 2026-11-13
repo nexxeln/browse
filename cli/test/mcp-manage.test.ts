@@ -71,6 +71,7 @@ describe("the manage tool", () => {
     try {
       const one = await mcp.request("tools/call", manageCall("help", { tool: "session_new" }))
       expect(one.result?.isError, JSON.stringify(one)).toBe(false)
+      expect(one.result).not.toHaveProperty("structuredContent")
       const text = resultText(one)
       expect(text).toStartWith("session_new: Create a browse session and make it your current one.")
       expect(text).toContain("\nargs:\n")
@@ -112,7 +113,8 @@ describe("the manage tool", () => {
     try {
       const reply = await mcp.request("tools/call", manageCall("status"))
       expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
-      // The status tool's JSON, as the text of the result.
+      // Text only: the JSON the status tool used to send as structured content.
+      expect(reply.result).not.toHaveProperty("structuredContent")
       expect(reply.result?.content).toHaveLength(1)
       const status = resultJson<typeof StatusToolOutput.Type>(reply)
       expect(Schema.is(StatusToolOutput)(status)).toBe(true)
