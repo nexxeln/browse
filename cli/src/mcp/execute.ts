@@ -52,6 +52,18 @@ Press the buttons the request calls for yourself (submit, save, place order, con
           const sessionId = args.session ?? caller.id
           const connected = RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
           yield* connected
+          // A first call with no session and no target starts on the tab the user lent, when there is exactly one:
+          // that is the page the request is about, and finding it otherwise costs the agent two more calls. With no
+          // lent tab, or several, adoption fails and the session opens its own tab as before.
+          // Only for a session that does not exist yet: adopting into a live one would close the tab it is working in
+          // (a restarted MCP server finds its session already there).
+          if (!args.session && !args.targetSelection && !caller.established) {
+            const exists = yield* ctx.relay.sessions.pipe(
+              Effect.map((sessions) => sessions.some((session) => session.id === sessionId)),
+              Effect.orElseSucceed(() => true),
+            )
+            if (!exists) yield* ctx.relay.sessionAdopt({ sessionId, createIfMissing: true }).pipe(Effect.ignore)
+          }
           const run = ctx.relay.execute({
             sessionId,
             code: args.code,
