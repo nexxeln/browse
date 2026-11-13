@@ -148,6 +148,7 @@ const registerTools = Effect.gen(function* () {
         name: spec.name,
         description: spec.description,
         inputSchema: spec.inputSchema,
+        ...(spec.alwaysLoad ? { _meta: { "anthropic/alwaysLoad": true } } : {}),
         annotations: {
           readOnlyHint: spec.readOnly,
           destructiveHint: spec.destructive,

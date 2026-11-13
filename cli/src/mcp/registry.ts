@@ -22,6 +22,11 @@ export type McpToolSpec = {
   readonly outputSchema?: Schema.ConstraintEncoder<unknown, never>
   /** Overrides the generic tool result (execute shapes its value and context itself). */
   readonly result?: (value: unknown) => McpSchema.CallToolResult
+  /**
+   * Ask clients that defer MCP tools behind a tool search to keep this one loaded. Without it an agent spends a
+   * whole model call fetching the schema of the one tool every browse task uses.
+   */
+  readonly alwaysLoad?: boolean
   /** For a tool that fronts several others: which one handled the call, and its value, so the right result shaper runs. */
   readonly route?: (value: unknown) => { readonly spec: McpToolSpec; readonly value: unknown }
 }

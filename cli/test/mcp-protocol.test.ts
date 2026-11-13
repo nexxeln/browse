@@ -184,6 +184,10 @@ describe("MCP protocol versions", () => {
     mcp.notify("notifications/initialized")
     const tools = (await mcp.request("tools/list")).result?.tools as Array<{ name: string; description: string; _meta?: Record<string, unknown> }>
     expect(tools.map((tool) => tool.name)).toEqual(["execute", "manage"])
+    const execute = tools[0]!
+    // Clients that defer tools behind a tool search keep execute loaded.
+    expect(execute._meta).toEqual({ "anthropic/alwaysLoad": true })
+    expect(tools[1]!._meta).toBeUndefined()
     const secrets = await mcp.request("tools/call", manageCall("secrets_list"))
     expect(secrets.result?.isError, JSON.stringify(secrets)).toBe(false)
     mcp.close()

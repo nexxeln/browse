@@ -109,6 +109,7 @@ describe("tool output schemas", () => {
     const advertised = specs()
     expect(advertised.map((spec) => spec.name)).toEqual(["execute", "manage"])
     for (const spec of advertised) expect(spec.outputSchema, spec.name).toBeUndefined()
+    expect(advertised[0]!.alwaysLoad).toBe(true)
     expect(advertised[1]!.inputSchema).toEqual({
       type: "object",
       properties: { tool: { type: "string" }, args: { type: "object" } },
