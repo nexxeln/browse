@@ -60,6 +60,8 @@ export type HideGhostCursorOptions = {
   readonly page?: Page
 }
 
+import type { DragHelper } from "./drag.ts"
+
 export type SandboxGlobals = {
   readonly browser: Browser
   readonly context: BrowserContext
@@ -69,6 +71,7 @@ export type SandboxGlobals = {
   readonly files: ExecuteFiles
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
+  readonly drag: DragHelper
   readonly screenshotWithLabels: (options?: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
   readonly screenshotDiff: (options: ScreenshotDiffOptions) => Promise<ScreenshotDiffResult>
   readonly ariaSnapshot: AriaSnapshotHelper
@@ -210,6 +213,7 @@ const sandboxGlobalKeys = [
   "files",
   "fillInput",
   "fillInputs",
+  "drag",
   "screenshotWithLabels",
   "screenshotDiff",
   "ariaSnapshot",

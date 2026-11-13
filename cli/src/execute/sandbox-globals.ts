@@ -14,6 +14,7 @@ import {
 } from "../ghost-cursor.ts"
 import type * as NetworkCapture from "../network-capture.ts"
 import { PageConsole } from "./console.ts"
+import { createDragHelper } from "./drag.ts"
 import { createScreenshotDiff } from "../snapshot/screenshot-diff.ts"
 import {
   createAriaSnapshotHelper,
@@ -135,6 +136,7 @@ export function buildSandboxGlobals(deps: {
       await fillInput({ page, target, value })
       deps.warnSyntheticInput()
     },
+    drag: createDragHelper(page, context),
     fillInputs: async (targetPage, fields) => {
       await fillInputs(targetPage, fields)
       deps.warnSyntheticInput()
