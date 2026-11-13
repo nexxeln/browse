@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { bundleCli } from "../bundle.ts"
 import { startRelay, stopRelay } from "./relay-harness.ts"
-import { mcpStdio } from "./support/mcp-stdio.ts"
+import { mcpStdio, resultText } from "./support/mcp-stdio.ts"
 import { freePort } from "./support/ports.ts"
 
 // The real MCP server over stdio, answering a pre-2026 client (initialize) and a 2026-07-28 client (request metadata).
@@ -102,11 +102,11 @@ describe("MCP protocol versions", () => {
         await Bun.sleep(350)
         extension = attach()
         expect(await extension.pair()).toBe(true)
-        const { result } = await first
-        expect(result?.isError, JSON.stringify(result)).toBe(false)
-        expect(result?.structuredContent).toMatchObject(
-          name === "execute" ? { session: "survivor", value: 42 } : { session: { id: "survivor" } },
-        )
+        const reply = await first
+        expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
+        // execute answers with the returned value as text (and no session id).
+        if (name === "execute") expect(resultText(reply).split("\n")[0]).toBe("42")
+        else expect(reply.result?.structuredContent).toMatchObject({ session: { id: "survivor" } })
       }
     } finally { extension.close(); mcp.close(); await stopRelay(relay.child) }
   }, 15_000)

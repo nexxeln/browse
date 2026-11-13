@@ -2,6 +2,8 @@ import { Effect, Fiber } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import { registerRefSelector } from "./snapshot/ref-selector.ts"
+import { capturePageView, rememberPageView, renderPageView, settlePage, type PageView } from "./snapshot/page-view.ts"
+import { trackRequests, type RequestTracker } from "./execute/request-log.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
 import { challengeWarning } from "./execute/challenge-detection.ts"
@@ -177,6 +179,10 @@ export type ExecuteResult = {
   readonly warnings: readonly string[]
   readonly diagnostic?: string
   readonly aftermath?: ExecuteAftermath
+  /** The page after this call: all of it the first time or after it moved, otherwise what changed. */
+  readonly view?: string
+  /** The non-GET requests the session's pages made during this call, with their status. */
+  readonly requests?: readonly string[]
   readonly setupFailed?: true
 }
 
@@ -186,11 +192,38 @@ export type ExecuteOptions = {
   readonly actionTimeoutMs?: number
 }
 
+type Observation = {
+  readonly view?: string
+  readonly requests?: readonly string[]
+}
+
+/** Observations for a failed execute, keyed by the error that carries it out of the run. */
+const observations = new WeakMap<object, Observation>()
+const observeBudgetMs = 5_000
+
+const withDeadline = <A>(work: Promise<A>, ms: number): Promise<A | undefined> =>
+  Promise.race([
+    work.catch(() => undefined),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+  ])
+
+const withRequests = (secrets: ExecuteSecretsBridge, requests: readonly string[], view: string | undefined): Observation => ({
+  ...(view === undefined ? {} : { view: secrets.redactOutputText(view) }),
+  ...(requests.length > 0 ? { requests: requests.map((line) => secrets.redactOutputText(line)) } : {}),
+})
+
 export class ExecuteSandbox extends DefaultPageHost {
   private browser: Browser | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
-  private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
+  /**
+   * Refs and the last page view, per page: an agent that runs on another tab (targetUrl, targetIndex) gets that
+   * tab's own refs and a diff against what it last saw there, and finds the first tab's intact when it returns.
+   */
+  private pageRefs = new WeakMap<Page, { readonly registry: SnapshotRefRegistry; lastView?: PageView }>()
+  private readonly activeRegistries = new Set<SnapshotRefRegistry>()
+  /** One counter for every page's refs, so an id never means two elements in one session. */
+  private nextRef = 1
   private readonly networkCapture = new NetworkCapture.Recorder()
   private readonly viewportGuardContexts = new WeakSet<BrowserContext>()
   private readonly secrets: ExecuteSecretsBridge
@@ -243,6 +276,12 @@ export class ExecuteSandbox extends DefaultPageHost {
             context: globals.context,
             page: globals.page,
             run: async () => {
+              const requests = trackRequests(globals.context, () => globals.page.url())
+              const opened: Page[] = []
+              const onPage = (page: Page): void => {
+                opened.push(page)
+              }
+              globals.context.on("page", onPage)
               const { result, logs, logSummary, aftermath } = await runUserCode({
                 code,
                 globals,
@@ -251,9 +290,17 @@ export class ExecuteSandbox extends DefaultPageHost {
               })
                 .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
                 .catch(async (error: unknown) => {
-                  if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
-                  throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+                  globals.context.off("page", onPage)
+                  const observed = await this.observePage(globals, requests, opened)
+                  if (!(error instanceof ExecuteCodeError)) throw error
+                  const failure = error.aftermath
+                    ? new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+                    : error
+                  observations.set(failure, observed)
+                  throw failure
                 })
+              globals.context.off("page", onPage)
+              const observed = await this.observePage(globals, requests, opened)
               await this.networkCapture.settleForOutput()
               const extracted = extractExecuteMedia(result)
               const redactedValue = this.secrets.redactOutputValue(extracted.value)
@@ -273,6 +320,7 @@ export class ExecuteSandbox extends DefaultPageHost {
                 logSummary,
                 warnings,
                 aftermath: this.secrets.redactCaptureAftermath(aftermath),
+                ...observed,
               }
             },
           })
@@ -322,6 +370,7 @@ export class ExecuteSandbox extends DefaultPageHost {
             warnings,
             ...(diagnostic ? { diagnostic: this.secrets.redactOutputText(diagnostic) } : {}),
             ...(aftermath ? { aftermath: this.secrets.redactCaptureAftermath(aftermath) } : {}),
+            ...(observations.get(error) ?? {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
         },
@@ -386,6 +435,56 @@ export class ExecuteSandbox extends DefaultPageHost {
    * After a call that navigated or failed, look for a bot challenge or block page on the session page. A challenge the
    * browser clears by itself is waited out (bounded); an interactive one or a block is reported, never touched.
    */
+  /**
+   * What the agent would otherwise spend its next call finding out: the requests its code caused and the page as it
+   * now stands (or how it changed). Waits briefly for requests in flight and for the DOM to settle. Never throws.
+   */
+  private async observePage(globals: SandboxGlobals, requests: RequestTracker, opened: readonly Page[] = []): Promise<Observation> {
+    const deadline = Date.now() + observeBudgetMs
+    try {
+      while (requests.pending() && Date.now() < deadline - 2_000) await new Promise((resolve) => setTimeout(resolve, 25))
+      const page = globals.page
+      if (page.isClosed()) return withRequests(this.secrets, requests.stop(), undefined)
+      await withDeadline(settlePage(page), 1_200)
+      // Requests the settle gave time to start (a debounced search) get their answer rendered before the read.
+      if (requests.pending()) {
+        while (requests.pending() && Date.now() < deadline - 2_000) await new Promise((resolve) => setTimeout(resolve, 25))
+        await withDeadline(settlePage(page), 1_200)
+      }
+      const lines = requests.stop()
+      const refs = this.refsFor(page)
+      refs.registry.nextRef = Math.max(refs.registry.nextRef ?? 1, this.nextRef)
+      const view = await withDeadline(capturePageView(page, globals.snapshot, refs.registry), Math.max(500, deadline - Date.now()))
+      this.nextRef = Math.max(this.nextRef, refs.registry.nextRef ?? 1)
+      if (!view) return withRequests(this.secrets, lines, undefined)
+      const previous = refs.lastView
+      refs.lastView = rememberPageView(refs.lastView, view)
+      // A tab the code opened is shown at once, so the agent need not spend a call to look at it.
+      const fresh = opened.filter((other) => other !== page && !other.isClosed()).at(-1)
+      let freshView = ""
+      if (fresh && Date.now() < deadline - 800) {
+        const freshRefs = this.refsFor(fresh)
+        freshRefs.registry.nextRef = Math.max(freshRefs.registry.nextRef ?? 1, this.nextRef)
+        const captured = await withDeadline(
+          capturePageView(fresh, createSnapshotHelpers(fresh, freshRefs.registry).snapshot, freshRefs.registry),
+          Math.max(500, deadline - Date.now()),
+        )
+        this.nextRef = Math.max(this.nextRef, freshRefs.registry.nextRef ?? 1)
+        if (captured) {
+          freshView = `\n\nNew tab (pass targetUrl to work in it, its refs resolve there):\n${renderPageView(freshRefs.lastView, captured)}`
+          freshRefs.lastView = rememberPageView(freshRefs.lastView, captured)
+        }
+      }
+      const others = globals.context.pages().filter((other) => other !== page && !other.isClosed() && (other !== fresh || !freshView))
+      const tabs = others.length > 0
+        ? `\nOther tabs (run on one with targetUrl): ${others.slice(0, 6).map((other) => other.url()).join(" · ")}`
+        : ""
+      return withRequests(this.secrets, lines, `${renderPageView(previous, view)}${tabs}${freshView}`)
+    } catch {
+      return withRequests(this.secrets, requests.stop(), undefined)
+    }
+  }
+
   private async withChallenge(page: Page, aftermath: ExecuteAftermath, failed: boolean): Promise<ExecuteAftermath> {
     if (!failed && aftermath.navigations.length === 0 && aftermath.startUrl === aftermath.endUrl) return aftermath
     const outcome = await detectChallenge(page, { waitMs: challengeWaitMs() }).catch(() => undefined)
@@ -649,7 +748,7 @@ export class ExecuteSandbox extends DefaultPageHost {
       page,
       state: this.state,
       realm: this.realm,
-      snapshotRefs: this.snapshotRefs,
+      snapshotRefs: this.refsFor(page).registry,
       networkCapture: this.networkCapture,
       secrets: this.secrets,
       requestHandoff: this.options.requestHandoff,
@@ -661,10 +760,24 @@ export class ExecuteSandbox extends DefaultPageHost {
     })
   }
 
+  private refsFor(page: Page): { readonly registry: SnapshotRefRegistry; lastView?: PageView } {
+    let refs = this.pageRefs.get(page)
+    if (!refs) {
+      refs = { registry: { selectors: new Map(), nextRef: this.nextRef } }
+      this.pageRefs.set(page, refs)
+      this.activeRegistries.add(refs.registry)
+    }
+    return refs
+  }
+
   protected clearSnapshotRefs(): void {
-    this.snapshotRefs.removeNavigationListener?.()
-    delete this.snapshotRefs.removeNavigationListener
-    invalidateSnapshotDocument(this.snapshotRefs)
+    for (const registry of this.activeRegistries) {
+      registry.removeNavigationListener?.()
+      delete registry.removeNavigationListener
+      invalidateSnapshotDocument(registry)
+    }
+    this.activeRegistries.clear()
+    this.pageRefs = new WeakMap()
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {

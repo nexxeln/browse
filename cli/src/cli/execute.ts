@@ -226,6 +226,12 @@ const execute = Command.make(
     if (aftermath) {
       yield* print(aftermath)
     }
+    if (result.requests && result.requests.length > 0) {
+      yield* print(`Requests:\n${result.requests.join("\n")}`)
+    }
+    if (result.view) {
+      yield* print(result.view)
+    }
     if (result.isError) {
       yield* failExit
     }

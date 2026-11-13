@@ -8,7 +8,7 @@ import "../src/mcp.ts"
 import { buildRegisteredMcpTools, callerSessionId, createMcpToolContext } from "../src/mcp/registry.ts"
 import type * as RelayClient from "../src/relay/client.ts"
 import { FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
-import { mcpStdio, type McpReply } from "./support/mcp-stdio.ts"
+import { mcpStdio, resultText, type McpReply } from "./support/mcp-stdio.ts"
 
 // OpenCode runs one MCP server per server config and process, shared by every agent session and subagent, and names
 // the calling agent in each tools/call's _meta. Each named agent gets its own current session; calls that name no
@@ -120,26 +120,42 @@ describe("one MCP server shared by several agents", () => {
     const mcp = await initialized(relay.port)
     const call = async (name: string, args: Record<string, unknown>, sessionID?: string) =>
       structured(await mcp.request("tools/call", { name, arguments: args, ...(sessionID ? { _meta: agent(sessionID) } : {}) }))
+    // An execute result no longer names its session, so each bare execute marks the state of the session it runs in
+    // and the session list says where the mark landed.
+    const ranIn = async (mark: string, sessionID?: string) => {
+      const reply = await mcp.request("tools/call", {
+        name: "execute",
+        arguments: { code: `state.${mark} = true; return "${mark}"` },
+        ...(sessionID ? { _meta: agent(sessionID) } : {}),
+      })
+      expect(reply.result?.isError, JSON.stringify(reply)).toBe(false)
+      expect(reply.result).not.toHaveProperty("structuredContent")
+      const text = resultText(reply)
+      expect(text.split("\n")[0]).toBe(mark)
+      expect(text).not.toMatch(/mcp-[0-9a-f]{8}|a-work/)
+      const { sessions } = await call("session_list", {}) as { sessions: Array<{ id: string; stateKeys: string[] }> }
+      return sessions.filter((session) => session.stateKeys.includes(mark)).map((session) => session.id)
+    }
     try {
       // status says whether this caller shares its current session with every other unnamed caller.
       expect(await call("status", {}, "ses_a")).toMatchObject({ sharedSession: false })
       expect(await call("status", {})).toMatchObject({ sharedSession: true })
 
       // Two agents' bare executes land in two sessions, each on its own tab.
-      expect(await call("execute", { code: "return 1" }, "ses_a")).toMatchObject({ session: callerSessionId("ses_a") })
-      expect(await call("execute", { code: "return 2" }, "ses_b")).toMatchObject({ session: callerSessionId("ses_b") })
+      expect(await ranIn("one", "ses_a")).toEqual([callerSessionId("ses_a")])
+      expect(await ranIn("two", "ses_b")).toEqual([callerSessionId("ses_b")])
       const tabs = extension.commands.filter((command) => command.method === "tabs.create")
       expect(tabs).toHaveLength(2)
 
       // One agent's session_new is its own: the other's bare execute stays where it was.
       expect(await call("session_new", { id: "a-work" }, "ses_a")).toMatchObject({ session: { id: "a-work" } })
-      expect(await call("execute", { code: "return 3" }, "ses_b")).toMatchObject({ session: callerSessionId("ses_b") })
-      expect(await call("execute", { code: "return 4" }, "ses_a")).toMatchObject({ session: "a-work" })
+      expect(await ranIn("three", "ses_b")).toEqual([callerSessionId("ses_b")])
+      expect(await ranIn("four", "ses_a")).toEqual(["a-work"])
 
       // Calls that name no agent keep sharing one session, which session_use moves for all of them, as before.
       expect(await call("session_use", { id: "a-work" })).toEqual({ currentSession: "a-work" })
-      expect(await call("execute", { code: "return 5" })).toMatchObject({ session: "a-work" })
-      expect(await call("execute", { code: "return 6" }, "ses_b")).toMatchObject({ session: callerSessionId("ses_b") })
+      expect(await ranIn("five")).toEqual(["a-work"])
+      expect(await ranIn("six", "ses_b")).toEqual([callerSessionId("ses_b")])
 
       // idleMinutes: 0 from agent A covers A's tabs only (its first session's and a-work's); B's wait for the setting.
       await call("tabs_cleanup", { idleMinutes: 0 }, "ses_a")
@@ -161,5 +177,7 @@ describe("one MCP server shared by several agents", () => {
       mcp.close()
       await stopRelay(relay.child)
     }
-  }, 30_000)
+    // Each execute ends by reading the page for its page view. The fake browser never answers that read, so every
+    // execute here waits out the read's budget (about 6 s) before it answers.
+  }, 90_000)
 })

@@ -338,6 +338,42 @@ export function executeToolText(result: ExecuteResponse & { readonly notice?: st
   return result.notice ? `${text}\n\n${result.notice}` : text
 }
 
+const successLogLimit = 1500
+
+/**
+ * Everything an agent needs from one execute, as plain text: the returned value first, then what the call caused
+ * (warnings, console output, the requests the page made) and the page as it now stands or how it changed. Text
+ * only, with no structured copy: a client that shows both would send the model every result twice, and one that
+ * prefers the structured copy would show the value as escaped JSON.
+ */
+export function executeResultText(result: ExecuteResponse & { readonly notice?: string }): string {
+  const warnings = result.warnings ?? []
+  const parts: (string | undefined)[] = []
+  if (result.isError) {
+    parts.push(executeErrorText(result))
+  } else {
+    const value = Predicate.isString(result.value)
+      ? result.value
+      : result.value === undefined
+        ? (result.text === "undefined" ? "" : result.text)
+        : JSON.stringify(result.value)
+    parts.push(value || undefined)
+    if (warnings.length > 0) parts.push(warnings.map((warning) => `Warning: ${warning}`).join("\n"))
+    if (result.diagnostic) parts.push(`Diagnostic: ${result.diagnostic}`)
+    const logs = result.logs.length > 0 ? errorLogsBlock(result.logs) : undefined
+    if (logs) parts.push(clip(logs, successLogLimit))
+    const aftermath = result.aftermath
+    if (aftermath?.challenge !== undefined || (aftermath && (aftermath.consoleErrorCount > 0 || aftermath.pageErrorCount > 0 || aftermath.handoffs > 0))) {
+      parts.push(aftermath.challenge !== undefined ? `${aftermathLine({ ...aftermath, startUrl: aftermath.endUrl, navigations: [] }) ?? "Page:"} challenge: ${JSON.stringify(aftermath.challenge)}` : aftermathLine({ ...aftermath, startUrl: aftermath.endUrl, navigations: [] }))
+    }
+  }
+  if (result.requests && result.requests.length > 0) parts.push(`Requests:\n${result.requests.join("\n")}`)
+  if (result.view) parts.push(result.view)
+  if (result.notice) parts.push(result.notice)
+  const text = parts.filter((part): part is string => Boolean(part)).join("\n\n")
+  return text || "Done."
+}
+
 /**
  * The MCP result for one execute: images keep their content blocks and text, errors are text only, and everything else
  * also gets structured output.
@@ -347,7 +383,7 @@ export function executeToolResult(value: unknown): McpSchema.CallToolResult {
   if (result.media && result.media.length > 0) {
     return new McpSchema.CallToolResult({
       content: [
-        McpSchema.TextContent.make({ text: result.isError ? executeErrorText(result) : result.text }),
+        McpSchema.TextContent.make({ text: executeResultText(result.isError ? result : { ...result, value: result.text }) }),
         ...result.media.map((image) => McpSchema.ImageContent.make({
           data: new Uint8Array(Buffer.from(image.data, "base64")),
           mimeType: image.mimeType,
@@ -356,14 +392,7 @@ export function executeToolResult(value: unknown): McpSchema.CallToolResult {
       isError: result.isError,
     })
   }
-  // A failed execute is text only: a client that prefers structuredContent would otherwise show the context without
-  // the error.
-  if (result.isError) return toolResult({ text: executeToolText(result), isError: true })
-  return toolResultForValue(executeToolOutput(result), {
-    outputSchema: ExecuteToolOutput,
-    text: executeToolText(result),
-    isError: result.isError,
-  })
+  return toolResult({ text: executeResultText(result), isError: result.isError })
 }
 
 export const ensureSessionExists = Effect.fnUntraced(function* (relay: RelayClient.Interface, id: string) {

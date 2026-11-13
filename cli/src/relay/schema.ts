@@ -208,6 +208,8 @@ export const ExecuteResponse = Schema.Struct({
   warnings: Schema.optionalKey(Schema.Array(Schema.String)),
   diagnostic: Schema.optionalKey(Schema.String),
   aftermath: Schema.optionalKey(ExecuteAftermath),
+  view: Schema.optionalKey(Schema.String),
+  requests: Schema.optionalKey(Schema.Array(Schema.String)),
   session: ExecuteSessionSummary,
 })
 

@@ -4,7 +4,6 @@ import { Effect, Schema } from "effect"
 import type { McpSchema } from "effect/ai"
 import { buildRegisteredMcpTools, createMcpToolContext, type McpToolSpec } from "../src/mcp/registry.ts"
 import {
-  ExecuteToolOutput,
   StatusToolOutput,
   agentSettingKeys,
   executeToolOutput,
@@ -324,26 +323,25 @@ describe("tool output schemas", () => {
     expect(failure.message).toContain("browse settings set autoUpdate")
   })
 
-  test("execute structured content validates against its schema and carries the value once", () => {
+  test("execute answers with the returned value as text, once, with no structured content or session id", () => {
     const snapshot = "button \"Save\" [ref=e1]\ntextbox \"Name\" [ref=e2]"
     const result = executeToolResult(executeResponse({ text: snapshot, value: snapshot }))
-    const structured = result.structuredContent as typeof ExecuteToolOutput.Type
-    expect(Schema.is(ExecuteToolOutput)(structured)).toBe(true)
-    expect(structured).toEqual({ session: "mcp-1234abcd", value: snapshot })
-    expect(structured).not.toHaveProperty("text")
-    expect(structured).not.toHaveProperty("isError")
-    expect(structured).not.toHaveProperty("warnings")
-    expect(structured).not.toHaveProperty("logSummary")
-    expect(structured).not.toHaveProperty("aftermath")
+    expect(result.isError).toBe(false)
+    expect(result.structuredContent).toBeUndefined()
     expect(textBlocks(result)).toEqual([snapshot])
-    // One text block and one structured value: the spec-mandated fallback pair. The old result also held the session
-    // record, util.inspect text and a pretty-printed copy of everything.
-    const received = JSON.parse(resultJson(result)) as {
-      content: Array<{ type: string; text: string }>
-      structuredContent: { value: string }
-    }
+    // One text block is the whole result: no structured copy, session record or util.inspect text beside it.
+    const received = JSON.parse(resultJson(result)) as { content: Array<{ type: string; text: string }>; structuredContent?: unknown }
     expect(received.content).toEqual([{ type: "text", text: snapshot }])
-    expect(received.structuredContent.value).toBe(snapshot)
+    expect(received.structuredContent).toBeUndefined()
+    expect(resultJson(result)).not.toContain("mcp-1234abcd")
+  })
+
+  test("execute text is the value: a string as it is, other values as compact JSON, and Done. when there is nothing", () => {
+    const text = (overrides: Partial<ExecuteResponse>) => textBlocks(executeToolResult(executeResponse(overrides)))
+    expect(text({ text: "'hello'", value: "hello" })).toEqual(["hello"])
+    expect(text({ text: "{ title: 'Example', count: 2 }", value: { title: "Example", count: 2 } })).toEqual(['{"title":"Example","count":2}'])
+    expect(text({ text: "42", value: 42 })).toEqual(["42"])
+    expect(text({ text: "undefined" })).toEqual(["Done."])
   })
 
   test("execute carries the context only when it has content", () => {
@@ -362,14 +360,68 @@ describe("tool output schemas", () => {
         handoffs: 0,
       },
     }))
-    const structured = result.structuredContent as typeof ExecuteToolOutput.Type
-    expect(Schema.is(ExecuteToolOutput)(structured)).toBe(true)
-    expect(structured.value).toBe(42)
-    expect(structured.logs).toHaveLength(1)
-    expect(structured.logSummary?.totalCount).toBe(1)
-    expect(structured.warnings).toEqual(["careful"])
-    expect(structured.aftermath?.navigations).toEqual(["https://example.com/two"])
-    expect(textBlocks(result)).toEqual(["42"])
+    expect(result.isError).toBe(false)
+    expect(result.structuredContent).toBeUndefined()
+    // The page movement is not repeated as a line: the page view that follows a navigation shows where the page is.
+    expect(textBlocks(result)).toEqual(["42\n\nWarning: careful\n\nLogs (1):\n[log] hello"])
+    // Nothing happened beside the return: the text is the value alone.
+    expect(textBlocks(executeToolResult(executeResponse({ text: "42", value: 42, warnings: [] })))).toEqual(["42"])
+  })
+
+  test("execute text orders the value, warnings, diagnostic, logs, page errors, requests, page view and notice", () => {
+    const result = executeToolResult({
+      ...executeResponse({
+        text: "'saved'",
+        value: "saved",
+        logs: [{ source: "page", type: "error", text: "bad", repeatCount: 3 }],
+        warnings: ["first", "second"],
+        diagnostic: "execution-context/context-destroyed",
+        aftermath: {
+          startUrl: "https://example.com/items",
+          endUrl: "https://example.com/items",
+          navigations: [],
+          consoleErrorCount: 1,
+          pageErrorCount: 0,
+          handoffs: 1,
+        },
+        requests: ['POST /api/items {"name":"a"} → 201', "DELETE /api/items/1 → 204"],
+        view: 'Page: https://example.com/items — Items\n[e1 button "Save"]',
+      }),
+      notice: "Note: browse has an update.",
+    })
+    expect(result.structuredContent).toBeUndefined()
+    expect(textBlocks(result)).toEqual([[
+      "saved",
+      "Warning: first\nWarning: second",
+      "Diagnostic: execution-context/context-destroyed",
+      "Logs (1):\n[page error] bad (×3)",
+      "Page: 1 console error; 1 handoff",
+      'Requests:\nPOST /api/items {"name":"a"} → 201\nDELETE /api/items/1 → 204',
+      'Page: https://example.com/items — Items\n[e1 button "Save"]',
+      "Note: browse has an update.",
+    ].join("\n\n")])
+  })
+
+  test("execute text ends with the page view: the whole page, what changed, or that nothing did", () => {
+    const text = (view: string, value?: string) =>
+      textBlocks(executeToolResult(executeResponse(value === undefined ? { view } : { text: value, value, view })))
+    expect(text('Page: https://example.com/ — Example\nExample Domain\n[e1 link "More information"]', "ok"))
+      .toEqual(['ok\n\nPage: https://example.com/ — Example\nExample Domain\n[e1 link "More information"]'])
+    expect(text('Page changed (+1 −1 lines).\n+ [e2 button "Saved"]\n− [e2 button "Save"]', "ok"))
+      .toEqual(['ok\n\nPage changed (+1 −1 lines).\n+ [e2 button "Saved"]\n− [e2 button "Save"]'])
+    // With a page view there is something to say, so an empty return is not padded with Done.
+    expect(text("Page: unchanged")).toEqual(["Page: unchanged"])
+  })
+
+  test("a failed execute also carries the requests it made and the page view", () => {
+    const result = executeToolResult(executeResponse({
+      text: "Error: boom\n    at script:1:1",
+      isError: true,
+      requests: ["POST /api/items → 500"],
+      view: "Page: unchanged",
+    }))
+    expect(result.isError).toBe(true)
+    expect(textBlocks(result)).toEqual(["Error: boom\n    at script:1:1\n\nRequests:\nPOST /api/items → 500\n\nPage: unchanged"])
   })
 
   test("execute errors put their warnings, diagnostic, page movement and logs in the text, with no structured content", () => {

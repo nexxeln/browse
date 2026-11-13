@@ -47,3 +47,11 @@ export function mcpStdio(options: {
     close: () => child.kill(),
   }
 }
+
+/** The text of a tool result: its first text block. Results are text only, with no structured copy. */
+export function resultText(reply: McpReply): string {
+  const content = reply.result?.content as ReadonlyArray<{ type: string; text?: string }> | undefined
+  const text = content?.find((item) => item.type === "text")?.text
+  if (text === undefined) throw new Error(`no text in tool result: ${JSON.stringify(reply)}`)
+  return text
+}
