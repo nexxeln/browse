@@ -50,6 +50,15 @@ export {
   type SnapshotRefRegistry,
 } from "./snapshot/types.ts"
 
+/** Whether two URLs differ only in their fragment, so the same document serves both. */
+const sameDocumentUrl = (left: string, right: string): boolean => {
+  const strip = (url: string): string => {
+    const hash = url.indexOf("#")
+    return hash === -1 ? url : url.slice(0, hash)
+  }
+  return strip(left) === strip(right)
+}
+
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
 
@@ -184,6 +193,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       if (frame !== page.mainFrame()) {
         // The frame's document is gone: its refs fail closed, and nothing else changes.
         frameGenerations.set(frame, (frameGenerations.get(frame) ?? 0) + 1)
+        return
+      }
+      // A change of fragment only (an in-page route, an anchor) leaves the document and its elements in place.
+      if (registry.url !== undefined && sameDocumentUrl(registry.url, frame.url())) {
+        registry.url = frame.url()
         return
       }
       navigatedDuringCapture = true
@@ -414,7 +428,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       throw new Error(`Unknown snapshot ref: ${String(id)}; call snapshot() to get current refs`)
     }
     const normalized = id.startsWith("@") ? id.slice(1) : id
-    if (registry.page !== page || registry.url !== page.url()) {
+    if (registry.page !== page || registry.url === undefined || !sameDocumentUrl(registry.url, page.url())) {
       throw new Error("Snapshot refs are stale after a page change; call snapshot() again")
     }
     const snapshotRef = registry.selectors.get(normalized)
